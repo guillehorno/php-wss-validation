@@ -1,4 +1,5 @@
 <?php
+
 /**
  * xmlseclibs.php
  *
@@ -142,6 +143,39 @@ function canonical($tree, $element, $withcomments) {
     foreach ($element->childNodes AS $node) {
         canonical($elCopy, $node, $withcomments);
     }
+}
+
+/*
+ * @author OrangePeople Software Ltda <soporte@orangepeople.cl>
+ * helper function
+ * Modification by Hermann Alexander Arriagada Méndez
+ * for IssuerSerial
+ */
+
+function getIssuerName($X509Cert) {
+    $handler = fopen($X509Cert, "r");
+    $cert = fread($handler, 8192);
+    fclose($handler);
+    $cert_as_array = openssl_x509_parse($cert);
+    $name = $cert_as_array['name'];
+    $name = str_replace("/", ",", $name);
+    $name = substr($name, 1, strlen($name));
+    return $name;
+}
+
+/*
+ * @author OrangePeople Software Ltda <soporte@orangepeople.cl>
+ * helper function
+ * Modification by Hermann Alexander Arriagada Méndez
+ * for IssuerSerial
+ */
+function getSerialNumber($X509Cert) {
+    $handler = fopen($X509Cert, "r");
+    $cert = fread($handler, 8192);
+    fclose($handler);
+    $cert_as_array = openssl_x509_parse($cert);
+    $serialNumber = $cert_as_array['serialNumber'];
+    return $serialNumber;
 }
 
 /*
@@ -664,6 +698,8 @@ class XMLSecurityDSig {
     const C14N_COMMENTS = 'http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments';
     const EXC_C14N = 'http://www.w3.org/2001/10/xml-exc-c14n#';
     const EXC_C14N_COMMENTS = 'http://www.w3.org/2001/10/xml-exc-c14n#WithComments';
+    const NS_ENVELOPE = 'xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"';
+    const NS_XMLDSIG = 'xmlns:ds="http://www.w3.org/2000/09/xmldsig#"';
 
     const template = '<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
   <ds:SignedInfo>
@@ -679,6 +715,7 @@ class XMLSecurityDSig {
     private $canonicalMethod = NULL;
     private $prefix = 'ds';
     private $searchpfx = 'secdsig';
+    private $body = NULL;
 
     /* This variable contains an associative array of validated nodes. */
     private $validatedNodes = NULL;
@@ -810,7 +847,37 @@ class XMLSecurityDSig {
                     $canonicalmethod = $canonNode->getAttribute('Algorithm');
                 }
                 $this->signedInfo = $this->canonicalizeData($signInfoNode, $canonicalmethod);
+                $this->addEnvelopeNamespace();
                 return $this->signedInfo;
+            }
+        }
+        return NULL;
+    }
+
+    public function addEnvelopeNamespace() {
+        $this->signedInfo = str_replace(self::NS_XMLDSIG, self::NS_XMLDSIG . " " . self::NS_ENVELOPE, $this->signedInfo);
+    }
+
+    public function canonicalizeBody() {
+        $doc = $this->sigNode->ownerDocument;
+        $canonicalmethod = NULL;
+        if ($doc) {
+            $xpath = $this->getXPathObj();
+            $query = '//*[local-name()="Body"]';
+            $nodeset = $xpath->query($query);
+            $bodyNode = $nodeset->item(0);
+
+            $query = "./secdsig:SignedInfo";
+            $nodeset = $xpath->query($query, $this->sigNode);
+            if ($signInfoNode = $nodeset->item(0)) {
+                $query = "./secdsig:CanonicalizationMethod";
+                $nodeset = $xpath->query($query, $signInfoNode);
+                if ($canonNode = $nodeset->item(0)) {
+                    $canonicalmethod = $canonNode->getAttribute('Algorithm');
+                }
+                $this->body = $this->canonicalizeData($bodyNode, $canonicalmethod);
+
+                return $this->body;
             }
         }
         return NULL;
@@ -1211,6 +1278,29 @@ class XMLSecurityDSig {
             throw new Exception("Unable to locate SignatureValue");
         }
         return $objKey->verifySignature($this->signedInfo, base64_decode($sigValue));
+    }
+
+    public function getSigValue() {
+        $doc = $this->sigNode->ownerDocument;
+        $xpath = new DOMXPath($doc);
+        $xpath->registerNamespace('secdsig', XMLSecurityDSig::XMLDSIGNS);
+        $query = "string(./secdsig:SignatureValue)";
+        $sigValue = $xpath->evaluate($query, $this->sigNode);
+
+        if (empty($sigValue)) {
+            throw new Exception("Unable to locate SignatureValue");
+        }
+
+        return $sigValue;
+    }
+
+    /* Compare with SHA1 algorithm */
+
+    public function compareDigest($data) {
+        $digestValue = $this->sigNode->firstChild->nodeValue;
+        $digestValueBody = $this->calculateDigest(self::SHA1, $data);
+
+        return ($digestValue == $digestValueBody);
     }
 
     public function signData($objKey, $data) {
